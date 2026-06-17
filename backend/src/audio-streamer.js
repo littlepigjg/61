@@ -2,6 +2,7 @@ const fs = require('fs');
 const { execSync } = require('child_process');
 const EventEmitter = require('events');
 const StreamDistributor = require('./stream-distributor');
+const ListenerManager = require('./listener-manager');
 
 let ffmpeg = null;
 let ffmpegAvailable = false;
@@ -28,6 +29,16 @@ class AudioStreamer extends EventEmitter {
     this.currentReadStreams = new Map();
     this.playbackState = new Map();
     this._isPlaying = new Map();
+    this.listenerManager = new ListenerManager();
+    this._connectionMap = new Map();
+
+    this.listenerManager.on('listenersChange', (channelId, count) => {
+      const channel = this.channelManager.getChannel(channelId);
+      if (channel) {
+        channel.listeners = count;
+        this.channelManager.emit('listeners', channelId, count);
+      }
+    });
 
     this.channelManager.on('play', (channelId, track) => {
       this._startPlayback(channelId, track, 0);
@@ -57,21 +68,6 @@ class AudioStreamer extends EventEmitter {
         this._startPlayback(channelId, track, position);
       }
     });
-
-    this._startListenerSync();
-  }
-
-  _startListenerSync() {
-    setInterval(() => {
-      for (const [channelId, distributor] of this.distributors.entries()) {
-        const count = distributor.getClientCount();
-        const channel = this.channelManager.getChannel(channelId);
-        if (channel && channel.listeners !== count) {
-          channel.listeners = count;
-          this.channelManager.emit('listeners', channelId, count);
-        }
-      }
-    }, 1000);
   }
 
   _startPlayback(channelId, track, startPosition = 0) {
@@ -272,7 +268,26 @@ class AudioStreamer extends EventEmitter {
         this._startPlayback(channelId, channel.currentTrack, state ? state.position : 0);
       }
     }
-    return distributor.addClient();
+
+    const clientStream = distributor.addClient();
+    if (!clientStream) return null;
+
+    const connectionId = this.listenerManager.addListener(channelId);
+    this._connectionMap.set(clientStream, { channelId, connectionId });
+
+    const handleClose = () => {
+      const info = this._connectionMap.get(clientStream);
+      if (info) {
+        this.listenerManager.removeListener(info.channelId, info.connectionId);
+        this._connectionMap.delete(clientStream);
+      }
+    };
+
+    clientStream.once('close', handleClose);
+    clientStream.once('error', handleClose);
+    clientStream.once('finish', handleClose);
+
+    return clientStream;
   }
 
   hasStream(channelId) {
@@ -280,15 +295,14 @@ class AudioStreamer extends EventEmitter {
   }
 
   getListenerCount(channelId) {
-    const distributor = this.distributors.get(channelId);
-    if (!distributor) return 0;
-    return distributor.getClientCount();
+    return this.listenerManager.getListenerCount(channelId);
   }
 
   shutdown() {
     for (const channelId of this.distributors.keys()) {
       this._stopPlayback(channelId, false);
     }
+    this.listenerManager.shutdown();
   }
 }
 

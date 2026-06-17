@@ -137,19 +137,32 @@ app.get('/stream/:channelId', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Accept-Ranges', 'none');
+  res.status(200);
 
   const clientStream = audioStreamer.createClientStream(channelId);
 
   if (clientStream) {
     clientStream.pipe(res);
 
-    req.on('close', () => {
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        clientStream.unpipe(res);
+      } catch (e) {}
       try {
         clientStream.destroy();
       } catch (e) {}
-    });
+    };
+
+    req.on('close', cleanup);
+    req.on('aborted', cleanup);
+    res.on('close', cleanup);
+    res.on('finish', cleanup);
+    clientStream.on('error', cleanup);
   } else {
-    res.status(200);
     res.end();
   }
 });
