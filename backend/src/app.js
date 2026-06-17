@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -25,6 +26,20 @@ process.on('unhandledRejection', (reason, promise) => {
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+app.use((req, res, next) => {
+  let userId = req.cookies?.listener_uid;
+  if (!userId) {
+    userId = crypto.randomUUID();
+    res.cookie('listener_uid', userId, {
+      maxAge: 24 * 60 * 60 * 1000,
+      httpOnly: false,
+      sameSite: 'lax'
+    });
+  }
+  req.listenerUid = userId;
+  next();
+});
 
 const frontendPath = path.join(__dirname, '../../frontend');
 app.use(express.static(frontendPath));
@@ -116,6 +131,7 @@ app.post('/api/channels/:channelId/volume', (req, res) => {
 app.get('/stream/:channelId', (req, res) => {
   const channelId = req.params.channelId;
   const channel = channelManager.getChannel(channelId);
+  const userId = req.listenerUid;
 
   if (!channel) {
     return res.status(404).send('Channel not found');
@@ -140,31 +156,53 @@ app.get('/stream/:channelId', (req, res) => {
   res.setHeader('Accept-Ranges', 'none');
   res.status(200);
 
-  const clientStream = audioStreamer.createClientStream(channelId);
-
-  if (clientStream) {
-    clientStream.pipe(res);
-
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) return;
-      cleaned = true;
-      try {
-        clientStream.unpipe(res);
-      } catch (e) {}
-      try {
-        clientStream.destroy();
-      } catch (e) {}
-    };
-
-    req.on('close', cleanup);
-    req.on('aborted', cleanup);
-    res.on('close', cleanup);
-    res.on('finish', cleanup);
-    clientStream.on('error', cleanup);
-  } else {
+  const result = audioStreamer.createClientStream(channelId, userId);
+  if (!result) {
     res.end();
+    return;
   }
+
+  const { stream: clientStream, connectionId } = result;
+  res.setHeader('X-Connection-Id', connectionId);
+
+  clientStream.pipe(res);
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try {
+      clientStream.unpipe(res);
+    } catch (e) {}
+    try {
+      clientStream.destroy();
+    } catch (e) {}
+  };
+
+  req.on('close', cleanup);
+  req.on('aborted', cleanup);
+  res.on('close', cleanup);
+  res.on('finish', cleanup);
+  clientStream.on('error', cleanup);
+});
+
+app.post('/api/listeners/leave', (req, res) => {
+  const { channelId } = req.body || {};
+  const userId = req.listenerUid;
+  if (!userId) {
+    return res.json({ success: false });
+  }
+  const affected = audioStreamer.listenerManager.removeAllForUser(userId);
+  res.json({ success: true, affectedChannels: Array.from(affected), userId });
+});
+
+app.post('/api/listeners/heartbeat', (req, res) => {
+  const { connectionId, channelId } = req.body || {};
+  let success = false;
+  if (connectionId) {
+    success = audioStreamer.listenerManager.touch(connectionId, channelId);
+  }
+  res.json({ success });
 });
 
 app.get('/api/health', (req, res) => {

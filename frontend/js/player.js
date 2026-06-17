@@ -12,6 +12,8 @@ class RadioPlayer {
     this.ffmpegAvailable = true;
     this.serverVolume = 1.0;
     this.localVolume = 0.8;
+    this._heartbeatTimer = null;
+    this._pageHidden = false;
 
     this.audio.volume = this.localVolume;
 
@@ -65,8 +67,12 @@ class RadioPlayer {
     });
   }
 
-  selectChannel(channelId) {
+  async selectChannel(channelId) {
     if (this.currentChannel === channelId) return;
+
+    if (this.currentChannel) {
+      await this.notifyLeave();
+    }
 
     if (this.ws) {
       this.ws.close();
@@ -176,6 +182,46 @@ class RadioPlayer {
     });
   }
 
+  async notifyLeave() {
+    try {
+      await fetch(`${CONFIG.API_BASE}/api/listeners/leave`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        keepalive: true,
+        body: JSON.stringify({
+          channelId: this.currentChannel
+        })
+      });
+    } catch (e) {
+    }
+  }
+
+  _startHeartbeat() {
+    if (this._heartbeatTimer) return;
+    this._heartbeatTimer = setInterval(() => {
+      if (this._pageHidden) return;
+      try {
+        fetch(`${CONFIG.API_BASE}/api/listeners/heartbeat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            channelId: this.currentChannel
+          })
+        }).catch(() => {});
+      } catch (e) {
+      }
+    }, 8000);
+  }
+
+  _stopHeartbeat() {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
+    }
+  }
+
   bindEvents() {
     this.playBtn.addEventListener('click', () => {
       if (this.audio.paused) {
@@ -189,10 +235,17 @@ class RadioPlayer {
 
     this.audio.addEventListener('play', () => {
       this.updatePlayingState(true);
+      this._startHeartbeat();
     });
 
     this.audio.addEventListener('pause', () => {
       this.updatePlayingState(false);
+    });
+
+    this.audio.addEventListener('waiting', () => {
+    });
+
+    this.audio.addEventListener('canplay', () => {
     });
 
     this.volumeSlider.addEventListener('input', (e) => {
@@ -202,6 +255,20 @@ class RadioPlayer {
 
     this.audio.addEventListener('error', (e) => {
       console.error('Audio error:', e);
+    });
+
+    window.addEventListener('beforeunload', async () => {
+      await this.notifyLeave();
+      this._stopHeartbeat();
+    });
+
+    window.addEventListener('pagehide', async () => {
+      await this.notifyLeave();
+      this._stopHeartbeat();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      this._pageHidden = document.hidden;
     });
   }
 }

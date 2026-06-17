@@ -257,7 +257,7 @@ class AudioStreamer extends EventEmitter {
     }
   }
 
-  createClientStream(channelId) {
+  createClientStream(channelId, userId = null) {
     let distributor = this.distributors.get(channelId);
     if (!distributor) {
       distributor = new StreamDistributor();
@@ -272,12 +272,37 @@ class AudioStreamer extends EventEmitter {
     const clientStream = distributor.addClient();
     if (!clientStream) return null;
 
-    const connectionId = this.listenerManager.addListener(channelId);
-    this._connectionMap.set(clientStream, { channelId, connectionId });
+    const connectionId = this.listenerManager.addListener(channelId, userId);
+    this._connectionMap.set(clientStream, { channelId, connectionId, touchTimer: null });
+
+    const handleData = () => {
+      const info = this._connectionMap.get(clientStream);
+      if (info) {
+        this.listenerManager.touch(info.connectionId, channelId);
+      }
+    };
+
+    let touchCount = 0;
+    clientStream.on('data', () => {
+      touchCount++;
+      if (touchCount % 20 === 0) {
+        handleData();
+      }
+    });
+
+    const info = this._connectionMap.get(clientStream);
+    if (info) {
+      info.touchTimer = setInterval(() => {
+        this.listenerManager.touch(info.connectionId, channelId);
+      }, 5000);
+    }
 
     const handleClose = () => {
       const info = this._connectionMap.get(clientStream);
       if (info) {
+        if (info.touchTimer) {
+          clearInterval(info.touchTimer);
+        }
         this.listenerManager.removeListener(info.channelId, info.connectionId);
         this._connectionMap.delete(clientStream);
       }
@@ -287,7 +312,7 @@ class AudioStreamer extends EventEmitter {
     clientStream.once('error', handleClose);
     clientStream.once('finish', handleClose);
 
-    return clientStream;
+    return { stream: clientStream, connectionId };
   }
 
   hasStream(channelId) {
